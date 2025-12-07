@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Star Atlas Explorer</title>
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
+  <link rel="stylesheet" href="styles.css?v=ui2">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+  <div class="sidebar" id="sidebar" style="display:none;">
+    <div class="profile-icon" id="profileIcon" title="">👤</div>
+    <div class="profile-id" id="sidebarProfileId"></div>
+    <!-- Cache tooltip -->
+    <div class="cache-tooltip" id="cacheTooltip">
+      <div class="cache-tooltip-title">
+        <span id="cacheTooltipIcon">💾</span>
+        <span id="cacheTooltipTitle">Cache Status</span>
+      </div>
+      <div class="cache-tooltip-status" id="cacheTooltipStatus">Loading...</div>
+      <div class="cache-tooltip-age" id="cacheTooltipAge"></div>
+      <button class="cache-tooltip-btn" id="cacheUpdateBtn" style="display:none;">
+        ⚡ Update Cache
+      </button>
+      <button class="cache-tooltip-btn" id="cacheRefreshBtn">
+        🔄 Force Refresh
+      </button>
+      <button class="cache-tooltip-btn" id="cacheWipeBtn" style="background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%); margin-top: 4px;">
+        🗑️ Wipe & Reload
+      </button>
+    </div>
+  </div>
+  <div class="container">
+    <div id="fees-view">
+      <div class="hero">
+        <div class="hero-title">Star Atlas Explorer</div>
+        <div class="hero-subtitle">powered by the people</div>
+      </div>
+      <div class="form-box centered">
+        <input type="text" id="profileId" placeholder="Player Profile ID">
+        <button onclick="analyzeFees()" id="analyzeBtn">Analyze</button>
+      </div>
+      <div id="results"></div>
+    </div>
+  </div>
+  <script src="app.js?v=rent8"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <div id="price-ticker-bar" style="position:fixed;bottom:0;left:0;width:100%;height:32px;background:#181c24;color:#e2e8f0;font-size:15px;z-index:9999;display:flex;align-items:center;overflow:hidden;border-top:1px solid #23272f;">
+    <div id="price-ticker-outer" style="width:100%;overflow:hidden;">
+      <div id="price-ticker-content" style="display:flex;gap:64px;align-items:center;height:32px;will-change:transform;"></div>
+    </div>
+  </div>
+  <style>
+    @keyframes ticker-scroll {
+      0% { transform: translateX(100%); opacity: 0; }
+      10% { opacity: 1; }
+      90% { opacity: 1; }
+      100% { transform: translateX(-100%); opacity: 0; }
+    }
+    #price-ticker-content {
+      animation: ticker-scroll 30s linear infinite;
+    }
+    .ticker-item {
+      flex: 0 0 auto;
+      min-width: 120px;
+      justify-content: center;
+      align-items: center;
+      display: flex;
+    }
+  </style>
+  </body>
+</html>

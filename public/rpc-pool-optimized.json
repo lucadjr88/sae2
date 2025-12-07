@@ -1,0 +1,34 @@
+[
+  {
+    "name": "helius-main",
+    "url": "https://mainnet.helius-rpc.com/?api-key=746b2d69-ddf7-4f2a-8a81-ff88b195679a",
+    "ws": "wss://rpc.helius.xyz/?api-key=746b2d69-ddf7-4f2a-8a81-ff88b195679a",
+    "maxConcurrent": 15,
+    "cooldownMs": 60000,
+    "backoffBaseMs": 1500
+  },
+  {
+    "name": "onfinality-http",
+    "url": "https://solana.api.onfinality.io/rpc?apikey=03b093ba-6ada-4de4-92c3-02ec50a67e94",
+    "ws": "wss://solana.api.onfinality.io/ws?apikey=03b093ba-6ada-4de4-92c3-02ec50a67e94",
+    "maxConcurrent": 18,
+    "cooldownMs": 60000,
+    "backoffBaseMs": 800
+  },
+  {
+    "name": "drpc-http",
+    "url": "https://lb.drpc.live/solana/Ao_KB5dDik_SvZXE8ruGKzcSQox2x9cR8JUyQmlfqV1j",
+    "ws": "wss://lb.drpc.live/solana/Ao_KB5dDik_SvZXE8ruGKzcSQox2x9cR8JUyQmlfqV1j",
+    "maxConcurrent": 18,
+    "cooldownMs": 60000,
+    "backoffBaseMs": 800
+  },
+  {
+    "name": "publicnode-main",
+    "url": "https://solana-rpc.publicnode.com",
+    "ws": null,
+    "maxConcurrent": 12,
+    "cooldownMs": 60000,
+    "backoffBaseMs": 1200
+  }
+]
