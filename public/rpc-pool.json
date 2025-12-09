@@ -1,0 +1,82 @@
+[
+  {
+    "name": "drpc-http",
+    "url": "https://lb.drpc.live/solana/Ao_KB5dDik_SvZXE8ruGKzcSQox2x9cR8JUyQmlfqV1j",
+    "ws": "wss://lb.drpc.live/solana/Ao_KB5dDik_SvZXE8ruGKzcSQox2x9cR8JUyQmlfqV1j",
+    "maxConcurrent": 18,
+    "cooldownMs": 60000,
+    "backoffBaseMs": 800
+  },
+  {
+    "name": "publicnode-main",
+    "url": "https://solana-rpc.publicnode.com",
+    "ws": null,
+    "maxConcurrent": 18,
+    "cooldownMs": 60000,
+    "backoffBaseMs": 800
+  },
+  {
+    "name": "onfinality-http",
+    "url": "https://solana.api.onfinality.io/rpc?apikey=03b093ba-6ada-4de4-92c3-02ec50a67e94",
+    "ws": "wss://solana.api.onfinality.io/ws?apikey=03b093ba-6ada-4de4-92c3-02ec50a67e94",
+    "maxConcurrent": 15,
+    "cooldownMs": 60000,
+    "backoffBaseMs": 1000
+  },
+  {
+    "name": "helius-main",
+    "url": "https://mainnet.helius-rpc.com/?api-key=746b2d69-ddf7-4f2a-8a81-ff88b195679a",
+    "ws": "wss://rpc.helius.xyz/?api-key=746b2d69-ddf7-4f2a-8a81-ff88b195679a",
+    "maxConcurrent": 15,
+    "cooldownMs": 60000,
+    "backoffBaseMs": 1200
+  },
+  {
+    "name": "getblock-us",
+    "url": "https://go.getblock.us/86aac42ad4484f3c813079afc201451c",
+    "ws": null,
+    "maxConcurrent": 15,
+    "cooldownMs": 60000,
+    "backoffBaseMs": 1200
+  },
+  {
+    "name": "pocket-main",
+    "url": "https://solana.api.pocket.network/",
+    "ws": null,
+    "maxConcurrent": 12,
+    "cooldownMs": 60000,
+    "backoffBaseMs": 1500
+  },
+  {
+    "name": "vibe-main",
+    "url": "https://public.rpc.solanavibestation.com/",
+    "ws": null,
+    "maxConcurrent": 12,
+    "cooldownMs": 60000,
+    "backoffBaseMs": 1500
+  },
+  {
+    "name": "leorpc-main",
+    "url": "https://solana.leorpc.com/?api_key=FREE",
+    "ws": null,
+    "maxConcurrent": 12,
+    "cooldownMs": 60000,
+    "backoffBaseMs": 1500
+  },
+  {
+    "name": "alchemy-demo",
+    "url": "https://solana-mainnet.g.alchemy.com/v2/demo",
+    "ws": null,
+    "maxConcurrent": 8,
+    "cooldownMs": 90000,
+    "backoffBaseMs": 2000
+  },
+  {
+    "name": "blockeden-main",
+    "url": "https://api.blockeden.xyz/solana/KeCh6p22EX5AeRHxMSmc",
+    "ws": null,
+    "maxConcurrent": 8,
+    "cooldownMs": 90000,
+    "backoffBaseMs": 2000
+  }
+]

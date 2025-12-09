@@ -1,0 +1,42 @@
+[
+  {
+    "name": "helius-main",
+    "url": "https://mainnet.helius-rpc.com/?api-key=746b2d69-ddf7-4f2a-8a81-ff88b195679a",
+    "ws": "wss://rpc.helius.xyz/?api-key=746b2d69-ddf7-4f2a-8a81-ff88b195679a",
+    "maxConcurrent": 10,
+    "cooldownMs": 60000,
+    "backoffBaseMs": 2000
+  },
+  {
+    "name": "onfinality-http",
+    "url": "https://solana.api.onfinality.io/rpc?apikey=03b093ba-6ada-4de4-92c3-02ec50a67e94",
+    "ws": "wss://solana.api.onfinality.io/ws?apikey=03b093ba-6ada-4de4-92c3-02ec50a67e94",
+    "maxConcurrent": 12,
+    "cooldownMs": 60000,
+    "backoffBaseMs": 1000
+  },
+  {
+    "name": "drpc-http",
+    "url": "https://lb.drpc.live/solana/Ao_KB5dDik_SvZXE8ruGKzcSQox2x9cR8JUyQmlfqV1j",
+    "ws": "wss://lb.drpc.live/solana/Ao_KB5dDik_SvZXE8ruGKzcSQox2x9cR8JUyQmlfqV1j",
+    "maxConcurrent": 12,
+    "cooldownMs": 60000,
+    "backoffBaseMs": 1000
+  },
+  {
+    "name": "quicknode-main",
+    "url": "https://solana-mainnet.quicknode.pro/8f3f3f5b1b6e4e2b8e8f3f5b1b6e4e2b8e8f3f5b/",
+    "ws": "wss://solana-mainnet.quicknode.pro/8f3f3f5b1b6e4e2b8e8f3f5b1b6e4e2b8e8f3f5b/",
+    "maxConcurrent": 2,
+    "cooldownMs": 300000,
+    "backoffBaseMs": 5000
+  },
+  {
+    "name": "getblock-http",
+    "url": "https://go.getblock.io/d30d542dce8a4e25b3a1a6bd5ad95d0e",
+    "ws": null,
+    "maxConcurrent": 1,
+    "cooldownMs": 300000,
+    "backoffBaseMs": 5000
+  }
+]
