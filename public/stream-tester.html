@@ -1,0 +1,206 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Stream Tester - SA Explorer</title>
+  <style>
+    body{font-family:Inter,Segoe UI,Arial;margin:18px;color:#e6eef6;background:#0b1220}
+    .card{background:#071021;padding:14px;border-radius:8px;margin-bottom:12px}
+    label{display:block;margin-bottom:6px;color:#9aa6b2}
+    input,textarea{width:100%;padding:8px;border-radius:6px;border:1px solid #233042;background:#08121b;color:#e6eef6}
+    button{padding:8px 12px;border-radius:6px;border:none;background:#0ea5a4;color:#042024;cursor:pointer}
+    pre{background:#051018;padding:12px;border-radius:6px;overflow:auto;max-height:300px}
+    .progress{color:#7dd3fc}
+    table{width:100%;border-collapse:collapse}
+    th,td{padding:6px;border-bottom:1px solid #0f2330;text-align:left}
+    a{color:#7dd3fc}
+  </style>
+</head>
+<body>
+  <h2 style="color:#cfe9ff">Stream Tester - Wallet SAGE Fees</h2>
+
+  <div class="card">
+    <label>Wallet Pubkey</label>
+    <input id="wallet" placeholder="Enter wallet pubkey or leave blank to use cached example" />
+    <label style="margin-top:8px">Fleet Accounts (comma separated)</label>
+    <input id="fleets" placeholder="Optional: comma separated accounts" />
+    <div style="margin-top:10px;display:flex;gap:8px">
+      <button id="start">Start Stream</button>
+      <button id="cancel">Cancel</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="progress" id="status">Idle</div>
+    <pre id="log">No messages yet</pre>
+  </div>
+
+  <div class="card">
+    <h3 style="margin-top:0;color:#cfe9ff">Operations Details (decoded)</h3>
+    <div id="ops"></div>
+  </div>
+
+  <script>
+    const startBtn = document.getElementById('start');
+    const cancelBtn = document.getElementById('cancel');
+    const statusEl = document.getElementById('status');
+    const logEl = document.getElementById('log');
+    const opsEl = document.getElementById('ops');
+    let controller = null;
+
+    function log(...args){
+      console.log(...args);
+      logEl.textContent = (new Date()).toISOString() + ' - ' + args.map(a=> typeof a==='object'?JSON.stringify(a,null,2):String(a)).join(' ') + '\n' + logEl.textContent;
+    }
+
+    async function fetchTxDetails(txid){
+      try{
+        const res = await fetch('/api/tx-details/' + txid);
+        if (!res.ok) return { error: 'HTTP ' + res.status };
+        return await res.json();
+      }catch(e){ return { error: String(e) }; }
+    }
+
+    startBtn.onclick = async () => {
+      opsEl.innerHTML = '';
+      logEl.textContent = '';
+      statusEl.textContent = 'Starting...';
+
+      const wallet = document.getElementById('wallet').value.trim();
+      const fleetsRaw = document.getElementById('fleets').value.trim();
+      const fleetAccounts = fleetsRaw ? fleetsRaw.split(',').map(s=>s.trim()).filter(Boolean) : [];
+
+      const payload = {
+        walletPubkey: wallet || undefined,
+        fleetAccounts: fleetAccounts,
+        fleetNames: {},
+        fleetRentalStatus: {},
+        hours: 24
+      };
+
+      try{
+        controller = new AbortController();
+        const res = await fetch('/api/wallet-sage-fees-stream', {
+          method: 'POST',
+          headers: {'Content-Type':'application/json'},
+          body: JSON.stringify(payload),
+          signal: controller.signal
+        });
+        if (!res.ok) {
+          statusEl.textContent = 'Stream request failed: ' + res.status;
+          log('Stream request failed', res.statusText);
+          return;
+        }
+
+        statusEl.textContent = 'Connected, reading stream...';
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+          const {done, value} = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, {stream:true});
+          const messages = buffer.split('\n\n');
+          buffer = messages.pop() || '';
+          for (const msg of messages) {
+            if (!msg.trim() || !msg.startsWith('data: ')) continue;
+            const json = msg.substring(6);
+            let obj = null;
+            try{ obj = JSON.parse(json); }catch(e){ log('JSON parse error', e, json); continue; }
+            log('SSE', obj.type || obj.stage || 'event', obj);
+            if (obj.type === 'progress'){
+              statusEl.textContent = `Progress: ${obj.stage || ''} ${obj.percentage || ''} ${obj.processed||''}/${obj.total||''}`;
+              if (obj.feesByFleet) renderPartial(obj);
+            } else if (obj.type === 'complete' || obj.walletAddress) {
+              statusEl.textContent = 'Complete';
+              renderFinal(obj);
+              try{ await reader.cancel(); }catch(e){}
+              return;
+            } else if (obj.error) {
+              statusEl.textContent = 'Error: ' + obj.error;
+            }
+          }
+        }
+
+        if (buffer.trim()) {
+          // try parse leftover
+          const lines = buffer.split('\n').filter(l=>l.startsWith('data:'));
+          for (const l of lines){
+            try{ const o = JSON.parse(l.substring(6)); if (o.type==='complete') { renderFinal(o); statusEl.textContent='Complete (leftover)'; } }catch(e){}
+          }
+        }
+      }catch(e){
+        statusEl.textContent = 'Stream error: ' + e.message;
+        log('Stream error', e);
+      }
+    };
+
+    cancelBtn.onclick = () => {
+      if (controller) {
+        controller.abort();
+        statusEl.textContent = 'Aborted by user';
+        log('Aborted stream by user');
+      }
+    };
+
+    function renderPartial(update){
+      const html = `<div style="color:#7dd3fc">Partial: ${update.percentage||0}% - ${update.processed||0}/${update.total||0}</div>`;
+      opsEl.innerHTML = html + opsEl.innerHTML;
+    }
+
+    async function renderFinal(data){
+      opsEl.innerHTML = '';
+      const header = document.createElement('div');
+      header.innerHTML = `<div style="color:#9aa6b2">Transactions: ${data.transactionCount24h||0} | Signatures fetched: ${data.totalSignaturesFetched||0}</div>`;
+      opsEl.appendChild(header);
+
+      // Show operation categories and per-op details if available
+      const table = document.createElement('table');
+      const thead = document.createElement('thead'); thead.innerHTML = '<tr><th>Op</th><th>Count</th><th>Fee(SOL)</th><th>Details</th></tr>';
+      table.appendChild(thead);
+      const tbody = document.createElement('tbody');
+
+      try{
+        const opsEntries = Object.entries(data.feesByOperation || {});
+        opsEntries.sort((a,b)=>b[1].totalFee - a[1].totalFee);
+        for (const [opName,opStats] of opsEntries){
+          const tr = document.createElement('tr');
+          const feeSol = ((opStats.totalFee||0)/1e9).toFixed(6);
+          tr.innerHTML = `<td>${opName}</td><td>${opStats.count||0}</td><td>${feeSol}</td><td id="op-${opName}">Loading details...</td>`;
+          tbody.appendChild(tr);
+          // render details if present
+          if (opStats.details && Array.isArray(opStats.details) && opStats.details.length>0){
+            const detailsCell = tr.querySelector(`#op-${opName}`);
+            detailsCell.innerHTML = '';
+            const list = document.createElement('div');
+            for (const d of opStats.details.slice(0,100)){
+              const sig = d.signature || d.txid || d.tx || d.signature?.toString?.();
+              const row = document.createElement('div');
+              row.style.padding='6px'; row.style.borderTop='1px solid #0f2330';
+              row.innerHTML = `<div style="font-size:13px;color:#9aa6b2">${d.decodedKind||d.type||''} — ${d.material||''} — ${d.fee?((d.fee/1e9).toFixed(6)+' SOL'):''} — ${sig?('<a href="#" data-sig="'+sig+'">'+sig.substring(0,8)+'...</a>'):'no-tx'}</div>`;
+              list.appendChild(row);
+              if (sig){
+                (async ()=>{
+                  const dd = await fetchTxDetails(sig);
+                  let extra = '';
+                  if (dd.error) extra = `<span style="color:#ef4444">Error: ${dd.error}</span>`;
+                  else {
+                    extra = `<div style="margin-top:6px;color:#cfe9ff">Material: ${dd.material||'—'} | Qty: ${dd.quantity||'—'} | Recipe: ${dd.recipe||'—'} | Process: ${dd.process||'—'}</div>`;
+                  }
+                  const detailsDiv = document.createElement('div'); detailsDiv.style.marginTop='6px'; detailsDiv.innerHTML = extra;
+                  row.appendChild(detailsDiv);
+                })();
+              }
+            }
+            detailsCell.appendChild(list);
+          }
+        }
+      }catch(e){ log('renderFinal error', e); }
+
+      table.appendChild(tbody);
+      opsEl.appendChild(table);
+    }
+  </script>
+</body>
+</html>

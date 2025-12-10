@@ -1,0 +1,51 @@
+# Node
+node_modules/
+npm-debug.log*
+yarn-error.log*
+
+# VS Code
+.vscode/
+
+# TypeScript build artifacts
+*.tsbuildinfo
+
+# Logs
+logs/
+*.log
+
+# Caches and generated data
+cache/
+backups/
+
+# Rust targets
+**/target/
+
+# Dist/build outputs
+bin/**/target/
+dist/
+build/
+
+# Environment/Secrets (keep a sample separately)
+.env
+.env.*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.swp
+
+# Public cache
+public/*.cache.json
+
+# Local data
+
+analysis-*.json
+lutrizio-*.json
+
+
+# Exclude large external vendor repos (track via submodule or separate)
+star-atlas-cookbook-master/
+star-atlas-decoders/
