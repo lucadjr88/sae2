@@ -147,6 +147,12 @@ export async function getAccountTransactions(
 
       const sig: any = res.sig;
       const tx: any = res.tx;
+      // Save raw transaction to cache per-wallet (non-blocking, ignore cache errors)
+      try {
+        await setCache(`wallet-txs/${accountPubkey}`, sig.signature, tx);
+      } catch (e) {
+        // ignore cache write errors
+      }
       processedCount++;
 
       if (processedCount % 25 === 0) {

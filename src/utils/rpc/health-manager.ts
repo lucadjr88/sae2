@@ -3,8 +3,9 @@ import { IRpcHealthManager } from './types.js';
 
 export class RpcHealthManager implements IRpcHealthManager {
   private readonly UNHEALTHY_THRESHOLD = Number(process.env.RPC_UNHEALTHY_THRESHOLD || 100);
-  private readonly BACKOFF_BASE_MS = Number(process.env.RPC_BACKOFF_BASE_MS || 500); // Reduced from 2000
-  private readonly COOLDOWN_MS = Number(process.env.RPC_COOLDOWN_MS || 15000); // Reduced from 60000
+  // Allow runtime tuning for per-phase adjustments
+  private BACKOFF_BASE_MS = Number(process.env.RPC_BACKOFF_BASE_MS || 500); // Reduced from 2000
+  private COOLDOWN_MS = Number(process.env.RPC_COOLDOWN_MS || 15000); // Reduced from 60000
 
   constructor(private poolLoader: RpcPoolLoader) {}
 
@@ -100,6 +101,20 @@ export class RpcHealthManager implements IRpcHealthManager {
     } catch (e) {
       return false;
     }
+  }
+
+  /**
+   * Runtime setter to tune backoff base (ms)
+   */
+  setBackoffBaseMs(ms: number) {
+    if (typeof ms === 'number' && ms >= 0) this.BACKOFF_BASE_MS = ms;
+  }
+
+  /**
+   * Runtime setter to tune cooldown period (ms)
+   */
+  setCooldownMs(ms: number) {
+    if (typeof ms === 'number' && ms >= 0) this.COOLDOWN_MS = ms;
   }
 
   /**

@@ -7,6 +7,10 @@ export interface RpcOperationOptions {
   maxRetries?: number;
   fallbackToDefault?: boolean;
   logErrors?: boolean;
+  // Custom backoff base (ms) applied for 429 errors: actual backoff = base * (attempt+1)
+  rateLimitBackoffBaseMs?: number;
+  // If set, and an endpoint reports this many 429s, mark it as failed/unhealthy
+  markUnhealthyOn429Threshold?: number;
 }
 
 /**
@@ -160,9 +164,20 @@ export class RpcPoolConnection {
 
           lastError = err;
 
-          // On rate limit, wait longer before retry
+          // On rate limit, wait longer before retry. Allow custom base backoff.
           if (errorType === '429' && attempt < maxRetries) {
-            const backoffMs = Math.min(5000, (attempt + 1) * 1000);
+            const base = opts?.rateLimitBackoffBaseMs ?? 1000;
+            const backoffMs = Math.min(5000, base * (attempt + 1));
+            // If endpoint shows high 429 counts, mark unhealthy to avoid further use
+            try {
+              const metrics = this.poolManager.getRpcMetricsAt(picked.index);
+              const thresh = opts?.markUnhealthyOn429Threshold;
+              if (thresh && metrics && (metrics.errorCounts?.rateLimit429 || 0) >= thresh) {
+                this.poolManager.markRpcFailure(picked.index, '429-threshold');
+                // small pause to allow selector to skip it
+                await new Promise(resolve => setTimeout(resolve, Math.min(2000, backoffMs)));
+              }
+            } catch {}
             await new Promise(resolve => setTimeout(resolve, backoffMs));
           }
 
@@ -283,10 +298,11 @@ export class RpcPoolConnection {
     opts?: RpcOperationOptions & { commitment?: 'processed' | 'confirmed' | 'finalized' }
   ): Promise<AccountInfo<Buffer> | null> {
     return this.executeWithPool(
-      async (conn, _index) =>
-        conn.getAccountInfo(address, {
+      async (conn, _index) => {
+        return conn.getAccountInfo(address, {
           commitment: opts?.commitment,
-        }),
+        });
+      },
       opts
     );
   }
@@ -304,6 +320,39 @@ export class RpcPoolConnection {
           commitment: opts?.commitment,
         }),
       opts
+    );
+  }
+
+  /**
+   * Fetch program accounts via RPC pool (wraps `getProgramAccounts`)
+   */
+  async getProgramAccounts(
+    programId: PublicKey,
+    opts?: any,
+  ): Promise<any[]> {
+    return this.executeWithPool(
+      async (conn, index) => {
+        nlog(`[RpcPoolConnection] getProgramAccounts -> endpoint E${index}`);
+        // `getProgramAccounts` can be provider/connection-specific signatures
+        return (conn as any).getProgramAccounts(programId, opts);
+      },
+      { timeoutMs: opts?.timeoutMs ?? this.defaultTimeoutMs, maxRetries: opts?.maxRetries ?? this.defaultMaxRetries }
+    );
+  }
+
+  /**
+   * Fetch multiple accounts info via RPC pool (wraps `getMultipleAccountsInfo`)
+   */
+  async getMultipleAccountsInfo(
+    addresses: PublicKey[],
+    opts?: any,
+  ): Promise<(AccountInfo<Buffer> | null)[]> {
+    return this.executeWithPool(
+      async (conn, index) => {
+        nlog(`[RpcPoolConnection] getMultipleAccountsInfo chunk(${addresses.length}) -> endpoint E${index}`);
+        return (conn as any).getMultipleAccountsInfo(addresses, opts);
+      },
+      { timeoutMs: opts?.timeoutMs ?? this.defaultTimeoutMs, maxRetries: opts?.maxRetries ?? this.defaultMaxRetries }
     );
   }
 

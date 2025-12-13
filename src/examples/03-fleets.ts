@@ -4,9 +4,11 @@ import { byteArrayToString, readAllFromRPC } from "@staratlas/data-source";
 import { Fleet, SAGE_IDL } from "@staratlas/sage";
 import { newConnection, newAnchorProvider, withRetry } from '../utils/anchor-setup.js';
 import { RpcPoolConnection } from '../utils/rpc/pool-connection.js';
+import { createRpcPoolManager } from '../utils/rpc/rpc-pool-manager.js';
 import { nlog } from '../utils/log-normalizer.js';
 import { getRpcMetrics } from '../utils/rpc-pool.js';
 import { loadKeypair } from '../utils/wallet-setup.js';
+import { getCacheDataOnly, getCacheWithTimestamp, setCache } from '../utils/persist-cache.js';
 
 const SAGE_PROGRAM_ID = "SAGE2HAwep459SNq61LHvjxPk4pLPEJLoMETef7f7EE";
 const SRSLY_PROGRAM_ID = "SRSLY1fq9TJqCk1gNSE7VZL2bztvTn9wm4VR8u8jMKT";
@@ -110,6 +112,7 @@ export async function getFleets(rpcEndpoint: string, rpcWebsocket: string, walle
   // NEW: Also find fleets that have recent transactions signed by the wallet
   // This catches borrowed/rented fleets that don't have player profile in subProfile
   let walletAuthority: string | null = null;
+  let feePayerScannedDuringDerivation = false;
   // Diagnostics to return for debugging/UX
   let primaryPayerCounts: Array<[string, number]> = [];
   let fallbackPayerCounts: Array<[string, number]> = [];
@@ -179,6 +182,11 @@ export async function getFleets(rpcEndpoint: string, rpcWebsocket: string, walle
             if (tx) {
               const feePayer = tx?.transaction.message.accountKeys?.[0]?.pubkey?.toString();
               if (feePayer) payerCounts.set(feePayer, (payerCounts.get(feePayer) || 0) + 1);
+              try {
+                if (feePayer) await setCache(`wallet-txs/${feePayer}`, sig.signature, tx);
+              } catch (e) {
+                // ignore cache errors
+              }
             }
           } catch (err) {
             // tolerate errors, poolConnection already handles fallback
@@ -262,6 +270,11 @@ export async function getFleets(rpcEndpoint: string, rpcWebsocket: string, walle
                 if (!ptx) continue;
                 const payer = ptx?.transaction?.message?.accountKeys?.[0]?.pubkey?.toString?.();
                 if (payer) fallbackPayers.set(payer, (fallbackPayers.get(payer) || 0) + 1);
+                try {
+                  if (payer) await setCache(`wallet-txs/${payer}`, s.signature, ptx);
+                } catch (e) {
+                  // ignore cache errors
+                }
               } catch (err) {
                 // tolerate errors
               }
@@ -306,7 +319,17 @@ export async function getFleets(rpcEndpoint: string, rpcWebsocket: string, walle
       console.log('Analyzing wallet transactions for SAGE fleet involvement (optimized)...');
       const cutoffMs = Date.now() - (24 * 60 * 60 * 1000); // 24h cutoff
       
-      // Collect wallet signatures with early cutoff - process in chunks of 500
+      // Collect wallet signatures with early cutoff - process in chunks
+      // Tunable wallet scan parameters
+      const WALLET_SIG_BATCH = 200; // signatures per RPC fetch
+      const WALLET_SIG_PER_FLEET = 50; // fallback per-fleet limit
+      const WALLET_TX_CHUNK = 100; // concurrent tx fetches per batch (was 50)
+      const WALLET_FETCH_TIMEOUT_MS = 8000;
+      const WALLET_MAX_RETRIES = 1;
+      const WALLET_BACKOFF_BASE_MS = 500;
+      const WALLET_MARK_UNHEALTHY = 10;
+      const WALLET_BATCH_DELAY_MS = 50; // base delay between tx batches
+
       const walletSignatures: any[] = [];
       let before: string | undefined = undefined;
       const maxToAnalyze = 5000; // Allow more for 24h coverage, but process efficiently
@@ -337,10 +360,12 @@ export async function getFleets(rpcEndpoint: string, rpcWebsocket: string, walle
           batch = await poolConnection2.getSignaturesForAddress(
             new PublicKey(walletAuthority),
             { 
-              limit: 100,  // Reduced from 200 to 100 for less aggression
+              limit: WALLET_SIG_BATCH,
               before,
-              timeoutMs: 8000,
-              maxRetries: 1,
+              timeoutMs: WALLET_FETCH_TIMEOUT_MS,
+              maxRetries: WALLET_MAX_RETRIES,
+              rateLimitBackoffBaseMs: WALLET_BACKOFF_BASE_MS,
+              markUnhealthyOn429Threshold: WALLET_MARK_UNHEALTHY,
               logErrors: false,
             }
           );
@@ -387,7 +412,7 @@ export async function getFleets(rpcEndpoint: string, rpcWebsocket: string, walle
         
         // Apply delay before next batch
         if (walletSignatures.length < maxToAnalyze && batch.length > 0) {
-          await sleep(currentDelay);
+            await sleep(currentDelay);
         }
         
         if (batch.length === 0) break;
@@ -410,6 +435,10 @@ export async function getFleets(rpcEndpoint: string, rpcWebsocket: string, walle
       }
       
       nlog(`[wallet-scan] Collected ${walletSignatures.length} signatures`);
+      if (walletSignatures.length > 0) {
+        feePayerScannedDuringDerivation = true;
+        nlog(`[wallet-scan] Marking feePayerScannedDuringDerivation=true for ${walletAuthority}`);
+      }
       
       // Now extract fleet accounts from these transactions efficiently
       const preAnalysisMetrics = poolConnection2.getMetrics();
@@ -422,11 +451,23 @@ export async function getFleets(rpcEndpoint: string, rpcWebsocket: string, walle
       const startTime = Date.now();
       
       // Create RPC pool connection for parallelized fetching
-      const poolConnection = new RpcPoolConnection(connection);
-      
+      // Use a local RpcPoolManager with conservative settings for this heavy scanning phase
+      const localPoolManager = createRpcPoolManager();
+      // Keep per-endpoint concurrency as configured; avoid forcing very low limits here
+      try {
+        // Increase backoff and cooldown for this phase to let rate-limited endpoints recover
+        const hm: any = localPoolManager.getHealthManager();
+        if (typeof hm.setBackoffBaseMs === 'function') hm.setBackoffBaseMs(2000);
+        if (typeof hm.setCooldownMs === 'function') hm.setCooldownMs(120000);
+      } catch (e) {
+        // ignore
+      }
+      const poolConnection = new RpcPoolConnection(connection, localPoolManager);
+
       // Parallelized processing: fetch transactions in chunks and process concurrently
-      const chunkSize = 50; // number of signatures to fetch concurrently per batch
-      const timeoutMs = 8000; // per-request timeout
+      // Use a larger local chunk size to utilize more of the healthy endpoints
+      const chunkSize = Math.min(400, Math.max(80, Math.floor(walletSignatures.length > 0 ? walletSignatures.length / 4 : 200)));
+      const timeoutMs = 12000; // per-request timeout for this phase (increased to tolerate slower endpoints)
 
       function withTimeout<T>(p: Promise<T>, ms: number): Promise<T | null> {
         return new Promise(resolve => {
@@ -438,16 +479,25 @@ export async function getFleets(rpcEndpoint: string, rpcWebsocket: string, walle
 
       for (let i = 0; i < walletSignatures.length; i += chunkSize) {
         const batch = walletSignatures.slice(i, i + chunkSize);
-        const fetchPromises = batch.map(s =>
-          withTimeout(
+        const fetchPromises = batch.map(async (s: any) => {
+          // Try cache first (per-wallet folder) before hitting RPC
+          try {
+            if (walletAuthority) {
+              const cached = await getCacheDataOnly<any>(`wallet-txs/${walletAuthority}`, s.signature);
+              if (cached) return cached;
+            }
+          } catch (e) {
+            // ignore cache read errors
+          }
+          return withTimeout(
             poolConnection.getTransaction(s.signature, {
               maxSupportedTransactionVersion: 0,
               timeoutMs,
               maxRetries: 0,
             }),
             timeoutMs + 500
-          )
-        );
+          );
+        });
         const results = await Promise.all(fetchPromises);
 
         for (let j = 0; j < results.length; j++) {
@@ -470,6 +520,19 @@ export async function getFleets(rpcEndpoint: string, rpcWebsocket: string, walle
             continue;
           }
 
+          // Cache raw transaction per fee payer when possible
+          try {
+            const sigObj = batch[j];
+            const sigStr = sigObj && sigObj.signature ? sigObj.signature : undefined;
+            const feePayer = (tx as any).transaction?.message?.accountKeys?.[0]?.pubkey?.toString?.() ||
+              ((tx as any).transaction?.message?.accountKeys && (tx as any).transaction?.message?.accountKeys[0] && (tx as any).transaction?.message?.accountKeys[0].toString && (tx as any).transaction?.message?.accountKeys[0].toString());
+            if (feePayer && sigStr) {
+              try { await setCache('wallet-txs', `${feePayer}:${sigStr}`, tx); } catch (e) { /* ignore cache errors */ }
+            }
+          } catch (e) {
+            // ignore cache errors
+          }
+
           try {
             const accountKeys = (tx as any).transaction?.message?.staticAccountKeys || (tx as any).transaction?.message?.accountKeys || [];
             const hasSage = accountKeys.some((key: any) => key && key.toString && key.toString() === SAGE_PROGRAM_ID);
@@ -486,30 +549,62 @@ export async function getFleets(rpcEndpoint: string, rpcWebsocket: string, walle
           }
         }
         // brief pause between batches to reduce burst pressure
-        await new Promise(resolve => setTimeout(resolve, 50));
+        await new Promise(resolve => setTimeout(resolve, WALLET_BATCH_DELAY_MS + Math.floor(Math.random() * 40)));
       }
       console.log(`[tx-analysis] Found ${fleetCandidates.size} potential fleet accounts from transactions`);
       
       // Now verify which candidates are actually fleet accounts (536 bytes, SAGE owner)
+      // Use batched `getMultipleAccountsInfo` to speed up verification and avoid per-account RTTs.
+      const VERIFY_CHUNK_SIZE = 100; // tune: larger = faster but more bursty
+      const VERIFY_TIMEOUT_MS = 7000;
+      const VERIFY_MAX_RETRIES = 1;
+      const VERIFY_BACKOFF_BASE_MS = 500;
+      const VERIFY_MARK_UNHEALTHY = 10;
+
+      const poolForVerify = new RpcPoolConnection(connection);
+      const candidatesArr = Array.from(fleetCandidates);
       let verifiedCount = 0;
-      for (const candidate of fleetCandidates) {
-        verifiedCount++;
-        if (verifiedCount % 50 === 0) {
-          console.log(`[tx-analysis] verified ${verifiedCount}/${fleetCandidates.size} candidates...`);
+
+      for (let i = 0; i < candidatesArr.length; i += VERIFY_CHUNK_SIZE) {
+        const window = candidatesArr.slice(i, i + VERIFY_CHUNK_SIZE).map(k => new PublicKey(k));
+        if (i % (VERIFY_CHUNK_SIZE * 1) === 0) {
+          console.log(`[tx-analysis] verifying ${Math.min(i + VERIFY_CHUNK_SIZE, candidatesArr.length)}/${candidatesArr.length} candidates...`);
         }
-        
+
         try {
-          const accountInfo = await connection.getAccountInfo(new PublicKey(candidate));
-          if (!accountInfo) continue;
-          if (accountInfo.data.length !== 536) continue;
-          if (accountInfo.owner.toString() !== SAGE_PROGRAM_ID) continue;
-          
-          // This is a fleet account!
-          additionalFleetKeys.add(candidate);
-        } catch {
-          // Skip invalid accounts
+          const beforeMetrics = poolForVerify.getMetrics();
+          const infos = await poolForVerify.getMultipleAccountsInfo(window, {
+            timeoutMs: VERIFY_TIMEOUT_MS,
+            maxRetries: VERIFY_MAX_RETRIES,
+            rateLimitBackoffBaseMs: VERIFY_BACKOFF_BASE_MS,
+            markUnhealthyOn429Threshold: VERIFY_MARK_UNHEALTHY,
+          });
+          const afterMetrics = poolForVerify.getMetrics();
+
+          // Evaluate results
+          for (let j = 0; j < infos.length; j++) {
+            const info = infos[j];
+            const candidate = candidatesArr[i + j];
+            if (!info) continue;
+            try {
+              if (info.owner.toBase58() === SAGE_PROGRAM_ID && info.data.length === 536) {
+                additionalFleetKeys.add(candidate);
+                verifiedCount++;
+              }
+            } catch { /* ignore malformed */ }
+          }
+
+          // small jittered pause between batches to reduce burst
+          const jitter = Math.floor(Math.random() * 100);
+          await new Promise(resolve => setTimeout(resolve, 30 + jitter));
+        } catch (err) {
+          console.warn(`[tx-analysis] Error verifying chunk ${i}-${i + VERIFY_CHUNK_SIZE - 1}: ${err instanceof Error ? err.message : String(err)}`);
+          // backoff a bit on chunk error
+          const jitter = Math.floor(Math.random() * 200);
+          await new Promise(resolve => setTimeout(resolve, 200 + jitter));
         }
       }
+      console.log(`[tx-analysis] Found ${additionalFleetKeys.size} verified fleet accounts with recent wallet activity (verified ${verifiedCount})`);
       
       console.log(`[tx-analysis] Found ${additionalFleetKeys.size} verified fleet accounts with recent wallet activity`);
       
@@ -557,6 +652,9 @@ export async function getFleets(rpcEndpoint: string, rpcWebsocket: string, walle
                 logErrors: false,
               });
               const payer = tx?.transaction.message.accountKeys?.[0]?.pubkey?.toString();
+              try {
+                if (payer) await setCache(`wallet-txs/${payer}`, s.signature, tx);
+              } catch (e) {}
               if (payer === walletAuthority) { usedByWallet = true; break; }
             } catch (err) {
               // tolerate errors
@@ -575,28 +673,55 @@ export async function getFleets(rpcEndpoint: string, rpcWebsocket: string, walle
     const srslyProgramKey = new PublicKey(SRSLY_PROGRAM_ID);
     
     // Retry logic for SRSLY scan with exponential backoff
-    let accounts;
-    let srslyRetries = 0;
-    const maxSrslyRetries = 3;
-    while (srslyRetries < maxSrslyRetries) {
-      try {
-        accounts = await withRetry(() => connection.getProgramAccounts(srslyProgramKey));
-        console.log(`[SRSLY] Successfully fetched program accounts (attempt ${srslyRetries + 1})`);
-        break;
-      } catch (err) {
-        srslyRetries++;
-        const delay = Math.min(1000 * Math.pow(2, srslyRetries), 5000); // exponential backoff, max 5s
-        console.warn(`[SRSLY] Fetch failed (attempt ${srslyRetries}/${maxSrslyRetries}): ${err instanceof Error ? err.message : String(err)}`);
-        if (srslyRetries < maxSrslyRetries) {
-          console.log(`[SRSLY] Retrying in ${delay}ms...`);
-          await new Promise(resolve => setTimeout(resolve, delay));
-        }
+    let accounts: any[] | undefined;
+    // Use RpcPoolConnection for program account fetch to distribute load
+    const poolForSrsly = new RpcPoolConnection(connection);
+
+    // Try cache first (cache SRSLY program accounts for short TTL to avoid repeated heavy scans)
+    try {
+      const cacheKey = 'srsly_program_accounts';
+      const cached = await getCacheWithTimestamp<any[]>('srsly', cacheKey);
+      const CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+      if (cached && (Date.now() - cached.savedAt) < CACHE_TTL_MS) {
+        accounts = cached.data;
+        nlog('[SRSLY] Using cached program accounts');
       }
+    } catch (e) {
+      // ignore cache errors
     }
 
     if (!accounts) {
-      console.warn('[SRSLY] Failed to fetch program accounts after retries, skipping SRSLY scan');
-      accounts = [];
+      let srslyRetries = 0;
+      const maxSrslyRetries = 3;
+      while (srslyRetries < maxSrslyRetries) {
+        try {
+          console.log(`[SRSLY] Fetch attempt ${srslyRetries + 1} via RPC pool...`);
+          const beforeMetrics = poolForSrsly.getMetrics();
+          accounts = await withRetry(() => poolForSrsly.getProgramAccounts(srslyProgramKey, { timeoutMs: 20000, maxRetries: 5, rateLimitBackoffBaseMs: 1000, markUnhealthyOn429Threshold: 10 }));
+          const afterMetrics = poolForSrsly.getMetrics();
+          console.log(`[SRSLY] Successfully fetched program accounts (attempt ${srslyRetries + 1}) - accounts=${(accounts||[]).length}`);
+          nlog(`[SRSLY] pool metrics before=${JSON.stringify(beforeMetrics.map(m=>({i:m.index,processed:m.processedTxs,fail:m.failures,429:m.errorCounts.rateLimit429})))}`);
+          nlog(`[SRSLY] pool metrics after=${JSON.stringify(afterMetrics.map(m=>({i:m.index,processed:m.processedTxs,fail:m.failures,429:m.errorCounts.rateLimit429})))}`);
+
+          // Save to cache for short TTL
+          try { await setCache('srsly', 'srsly_program_accounts', accounts || []); } catch (e) {}
+
+          break;
+        } catch (err) {
+          srslyRetries++;
+          const delay = Math.min(1000 * Math.pow(2, srslyRetries), 5000); // exponential backoff, max 5s
+          console.warn(`[SRSLY] Fetch failed (attempt ${srslyRetries}/${maxSrslyRetries}): ${err instanceof Error ? err.message : String(err)}`);
+          if (srslyRetries < maxSrslyRetries) {
+            console.log(`[SRSLY] Retrying in ${delay}ms...`);
+            await new Promise(resolve => setTimeout(resolve, delay));
+          }
+        }
+      }
+
+      if (!accounts) {
+        console.warn('[SRSLY] Failed to fetch program accounts after retries, skipping SRSLY scan');
+        accounts = [];
+      }
     }
 
     // Helper to find byte subsequence
@@ -613,6 +738,19 @@ export async function getFleets(rpcEndpoint: string, rpcWebsocket: string, walle
     const borrowerBytes = playerProfilePubkey.toBytes();
     const srslyWithBorrower = accounts.filter(a => a.account.data && bufIncludes(a.account.data, borrowerBytes) !== -1);
     console.log(`[SRSLY] Found ${srslyWithBorrower.length} accounts referencing borrower profile`);
+    if (srslyWithBorrower.length > 0) {
+      try {
+        const details = srslyWithBorrower.slice(0, 20).map((entry: any, idx: number) => {
+          const pub = entry.pubkey && typeof entry.pubkey.toBase58 === 'function' ? entry.pubkey.toBase58() : String(entry.pubkey || '<unknown>');
+          const len = entry.account && entry.account.data ? entry.account.data.length : 0;
+          const matchIndex = bufIncludes(entry.account.data, borrowerBytes);
+          return { i: idx, pubkey: pub, dataLen: len, matchIndex };
+        });
+        nlog(`[SRSLY] referencing accounts details (first ${details.length}): ${JSON.stringify(details)}`);
+      } catch (e) {
+        nlog('[SRSLY] Failed to serialize referencing account details: ' + (e && (e as any).message ? (e as any).message : String(e)));
+      }
+    }
 
     // From those accounts, collect all 32-byte windows and probe for SAGE fleet accounts
     const candidateKeys = new Set<string>();
@@ -631,12 +769,19 @@ export async function getFleets(rpcEndpoint: string, rpcWebsocket: string, walle
     // Batch-check candidates in chunks with error handling
     const candidates = Array.from(candidateKeys);
     console.log(`[SRSLY] Checking ${candidates.length} candidate fleet keys...`);
-    const chunkSize = 50;
+    const chunkSize = 10; // reduced to lower burst per endpoint
     const discoveredFleetKeys: string[] = [];
+    // Use pool to check candidate batches (distribute across endpoints)
+    const poolForBatch = new RpcPoolConnection(connection);
     for (let i = 0; i < candidates.length; i += chunkSize) {
       const chunk = candidates.slice(i, i + chunkSize).map(k => new PublicKey(k));
       try {
-        const infos = await connection.getMultipleAccountsInfo(chunk);
+        console.log(`[SRSLY] Checking candidate batch ${i}-${Math.min(i+chunkSize-1,candidates.length-1)} (size=${chunk.length}) via pool`);
+        const beforeBatchMetrics = poolForBatch.getMetrics();
+        const infos = await poolForBatch.getMultipleAccountsInfo(chunk, { timeoutMs: 10000, maxRetries: 5, rateLimitBackoffBaseMs: 1000, markUnhealthyOn429Threshold: 10 });
+        const afterBatchMetrics = poolForBatch.getMetrics();
+        nlog(`[SRSLY] batch metrics before=${JSON.stringify(beforeBatchMetrics.map(m=>({i:m.index,processed:m.processedTxs,fail:m.failures,429:m.errorCounts.rateLimit429})))}`);
+        nlog(`[SRSLY] batch metrics after=${JSON.stringify(afterBatchMetrics.map(m=>({i:m.index,processed:m.processedTxs,fail:m.failures,429:m.errorCounts.rateLimit429})))}`);
         for (let j = 0; j < chunk.length; j++) {
           const info = infos[j];
           if (!info) continue;
@@ -648,8 +793,14 @@ export async function getFleets(rpcEndpoint: string, rpcWebsocket: string, walle
             }
           }
         }
+        // Small delay with jitter between batches to avoid bursts
+        const jitter = Math.floor(Math.random() * 200);
+        await new Promise(resolve => setTimeout(resolve, 100 + jitter));
       } catch (err) {
         console.warn(`[SRSLY] Error checking candidate batch: ${err instanceof Error ? err.message : String(err)}`);
+        // On error backoff slightly before next batch
+        const jitter = Math.floor(Math.random() * 200);
+        await new Promise(resolve => setTimeout(resolve, 200 + jitter));
       }
     }
 
@@ -812,6 +963,7 @@ export async function getFleets(rpcEndpoint: string, rpcWebsocket: string, walle
 
   return {
     fleets: fleetsData,
-    walletAuthority: walletAuthority
+    walletAuthority: walletAuthority,
+    _feePayerScannedDuringDerivation: feePayerScannedDuringDerivation
   };
 }

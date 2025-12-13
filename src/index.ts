@@ -19,7 +19,7 @@ import { SAGE_STARBASED_INSTRUCTIONS, CRAFTING_INSTRUCTIONS } from './decoders/u
 import fetch from 'node-fetch';
 import fs from 'fs';
 import { getRpcMetrics, pickNextRpcConnection, tryAcquireRpc, releaseRpc, markRpcFailure, markRpcSuccess } from './utils/rpc-pool.js';
-import { getGlobalRpcPoolManager } from './utils/rpc/rpc-pool-manager.js';
+import { getGlobalRpcPoolManager, createRpcPoolManager } from './utils/rpc/rpc-pool-manager.js';
 import { RpcPoolConnection } from './utils/rpc/pool-connection.js';
 import { Connection, PublicKey } from '@solana/web3.js';
 import { nlog } from './utils/log-normalizer.js';
@@ -148,17 +148,50 @@ app.post('/api/fleets', async (req, res) => {
     }
     let result = await getFleets(RPC_ENDPOINT, RPC_WEBSOCKET, WALLET_PATH, profileId);
 
-    // If we have a derived walletAuthority, scan fee-payer transactions via RPC pool
+    // If we have a derived walletAuthority, optionally scan fee-payer transactions via RPC pool.
+    // If the client provided an explicit `feePayer` in the request body and it equals the derived
+    // `walletAuthority`, skip the scan (redundant). Otherwise, scan the provided `feePayer` or
+    // fall back to the derived `walletAuthority`.
     try {
       const walletAuthority = result.walletAuthority;
-      if (walletAuthority) {
-        nlog(`[api/fleets] Scanning fee-payer transactions for ${walletAuthority} to find rented fleets`);
-        const scanRes = await scanFeePayerForRented(globalPoolConnection, walletAuthority, profileId, 1000);
+      const requestedFeePayer = req.body && req.body.feePayer ? String(req.body.feePayer) : null;
+
+      // Determine which pubkey to scan (requested overrides derived)
+      const scanTarget = requestedFeePayer || walletAuthority;
+
+      if (!scanTarget) {
+        // nothing to scan
+      } else if (requestedFeePayer && walletAuthority && requestedFeePayer === walletAuthority) {
+        nlog(`[api/fleets] Requested feePayer equals derived walletAuthority (${walletAuthority}); skipping fee-payer scan`);
+      } else {
+        nlog(`[api/fleets] Scanning fee-payer transactions for ${scanTarget} to find rented fleets`);
+        // Use a local RPC pool configured conservatively for heavy fee-payer scanning
+        const localManager = createRpcPoolManager();
+        try {
+          const pool = localManager.getPoolLoader().getPool();
+          for (const e of pool) {
+            // lower concurrency for this scan to avoid burst and 429s
+            e.maxConcurrent = Math.min(e.maxConcurrent || 12, 8);
+            // increase backoff base for this scan
+            e.backoffBaseMs = Math.max(e.backoffBaseMs || 1000, 1500);
+          }
+        } catch (e) {
+          // ignore
+        }
+        // Tune health manager for scan phase if possible
+        try {
+          const lhm: any = localManager.getHealthManager();
+          if (typeof lhm.setBackoffBaseMs === 'function') lhm.setBackoffBaseMs(2000);
+          if (typeof lhm.setCooldownMs === 'function') lhm.setCooldownMs(120000);
+        } catch (e) {}
+        const localPoolConnection = new RpcPoolConnection(defaultServerConnection, localManager);
+        const scanRes = await scanFeePayerForRented(localPoolConnection, scanTarget, profileId, 1000);
         // Merge rented fleets discovered on-chain into result.fleets if missing
         const existingKeys = new Set((result.fleets || []).map((f: any) => f.key));
         for (const rf of scanRes.rented) {
           if (!existingKeys.has(rf.key)) {
-            (result.fleets = result.fleets || []).push({
+            const list = ((result as any).fleets = (result as any).fleets || []);
+            list.push({
               callsign: rf.label,
               key: rf.key,
               data: {},
@@ -169,9 +202,9 @@ app.post('/api/fleets', async (req, res) => {
         }
         // Attach diagnostics
         (result as any)._feePayerScan = {
-          feePayer: walletAuthority,
-          rentedFound: scanRes.rented.map(r => ({ key: r.key, label: r.label, owner: r.owner })),
-          ownedFound: scanRes.owned.map(r => ({ key: r.key, label: r.label }))
+          feePayer: scanTarget,
+          rentedFound: scanRes.rented.map((r: any) => ({ key: r.key, label: r.label, owner: r.owner })),
+          ownedFound: scanRes.owned.map((r: any) => ({ key: r.key, label: r.label }))
         };
       }
     } catch (e) {
